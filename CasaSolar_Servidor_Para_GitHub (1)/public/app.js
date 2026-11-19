@@ -1,0 +1,16 @@
+const $=id=>document.getElementById(id);
+let current=null;let busy=false;
+function notify(s,bad=false){const n=$('notice');n.textContent=s;n.classList.toggle('bad',bad);n.style.display='block';clearTimeout(notify.timer);notify.timer=setTimeout(()=>n.style.display='none',3500);}
+async function api(url,options={}){const r=await fetch(url,{credentials:'same-origin',cache:'no-store',headers:{'Content-Type':'application/json'},...options});const data=await r.json();if(!r.ok)throw new Error(data.error||'Error del servidor');return data;}
+async function refresh(){try{const r=await api('/api/state');$('login').hidden=true;$('controls').hidden=false;current=r;const ok=r.online;$('online').textContent=ok?'ESP32 conectado':'ESP32 desconectado';$('online').className='pill '+(ok?'ok':'off');$('age').textContent=ok?'Última respuesta: '+r.ageSeconds+' s':'Sin comunicación';
+ const s=r.state||{};$('fanStatus').textContent='Potencia actual: '+(s.fan??0);$('motorStatus').textContent='Motor: '+(s.motor===1?'avance':s.motor===-1?'reversa':'detenido')+' · Control remoto '+(s.armed?'habilitado':'bloqueado');$('song').max=s.songCount||999;
+ $('leds').innerHTML='';for(let i=0;i<5;i++){const d=document.createElement('div');d.className='tile';const title=document.createElement('strong');title.textContent='LED '+(i+1);d.append(title,document.createTextNode((s.leds&&s.leds[i])?'Encendido':'Apagado'));const on=document.createElement('button');on.textContent='Encender';on.disabled=!ok||busy;on.onclick=()=>send({type:'led',index:i,on:true});const off=document.createElement('button');off.textContent='Apagar';off.className='danger';off.disabled=!ok||busy;off.onclick=()=>send({type:'led',index:i,on:false});d.append(on,off);$('leds').append(d);}
+ document.querySelectorAll('[data-type]').forEach(b=>b.disabled=!ok||busy||((b.dataset.type==='allOn'||b.dataset.type==='motor'&&b.dataset.direction!=='0')&&!s.armed));
+ }catch(e){$('login').hidden=false;$('controls').hidden=true;current=null;}}
+async function send(command){if(busy)return;busy=true;try{const r=await api('/api/command',{method:'POST',body:JSON.stringify(command)});notify('Orden enviada al ESP32 (#'+r.id+').');}catch(e){notify(e.message,true);}finally{busy=false;await refresh();}}
+$('loginForm').onsubmit=async(e)=>{e.preventDefault();try{await api('/api/login',{method:'POST',body:JSON.stringify({password:$('password').value})});$('password').value='';await refresh();}catch(err){notify(err.message,true);}};
+$('logout').onclick=async()=>{await api('/api/logout',{method:'POST'});await refresh();};
+document.querySelectorAll('[data-type]').forEach(b=>b.onclick=()=>{let c={type:b.dataset.type};if('on'in b.dataset)c.on=b.dataset.on==='true';if('power'in b.dataset)c.power=Number(b.dataset.power);if('direction'in b.dataset){c.direction=Number(b.dataset.direction);c.speed=Number($('motorSpeed').value);}send(c);});
+$('lcdForm').onsubmit=e=>{e.preventDefault();send({type:'lcd',line1:$('line1').value,line2:$('line2').value,mode:$('lcdMode').value,speed:Number($('lcdSpeed').value)});};
+$('musicForm').onsubmit=e=>{e.preventDefault();send({type:'music',song:Number($('song').value)-1,tempo:Number($('tempo').value),repeat:$('repeat').checked});};
+refresh();setInterval(refresh,2500);
