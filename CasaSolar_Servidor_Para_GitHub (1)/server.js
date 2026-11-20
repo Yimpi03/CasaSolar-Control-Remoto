@@ -4,26 +4,14 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 const PORT = Number(process.env.PORT || 3000);
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const SESSION_SECRET = process.env.SESSION_SECRET || '';
-const DEVICE_TOKEN = process.env.DEVICE_TOKEN || '';
-if (ADMIN_PASSWORD.length < 12 || SESSION_SECRET.length < 32 || DEVICE_TOKEN.length < 32) {
-  console.error('Configura ADMIN_PASSWORD (12+), SESSION_SECRET (32+) y DEVICE_TOKEN (32+) en Render.');
-  process.exit(1);
-}
+// Acceso publico solicitado: no se necesitan contrasenas ni tokens para el panel o ESP32.
 const base = path.join(__dirname, 'public');
 const types = {'.html':'text/html; charset=utf-8','.css':'text/css; charset=utf-8','.js':'application/javascript; charset=utf-8'};
+// Cualquiera puede consultar y enviar ordenes publicas. Mantener siempre supervision local.
 let deviceLastSeen = 0;
 let deviceState = {};
 let pending = null;
 let nextId = crypto.randomInt(100000, 1800000000); // Evita reutilizar IDs tras reinicios de Render.
-const logins = new Map();
-const SESSION_MS = 8 * 3600_000;
-function secureEq(a,b) {const x=crypto.createHash('sha256').update(String(a)).digest(); const y=crypto.createHash('sha256').update(String(b)).digest();return crypto.timingSafeEqual(x,y);}
-function sign(data){return crypto.createHmac('sha256', SESSION_SECRET).update(data).digest('base64url');}
-function cookieValue(){const data=Date.now()+SESSION_MS+'-'+crypto.randomBytes(15).toString('hex');return data+'.'+sign(data);}
-function authorized(req){const all=req.headers.cookie||'';const v=all.split(';').map(x=>x.trim()).find(x=>x.startsWith('casa_session='))?.slice(13);if(!v)return false;const i=v.lastIndexOf('.');if(i<0)return false;const data=v.slice(0,i);const exp=Number(data.split('-')[0]);return Number.isFinite(exp)&&exp>Date.now()&&secureEq(v.slice(i+1),sign(data));}
-function isDevice(req){const h=req.headers.authorization||'';return h.startsWith('Bearer ')&&secureEq(h.slice(7), DEVICE_TOKEN);}
 function respond(res,status,data,headers={}){res.writeHead(status,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store','X-Content-Type-Options':'nosniff',...headers});res.end(JSON.stringify(data));}
 function readBody(req){return new Promise((resolve,reject)=>{let chunks='';req.on('data',x=>{chunks+=x;if(chunks.length>4096){reject(new Error('Demasiados datos'));req.destroy();}});req.on('end',()=>{try{resolve(JSON.parse(chunks||'{}'));}catch(e){reject(e);}});req.on('error',reject);});}
 function validCommand(c){
@@ -49,30 +37,17 @@ const server=http.createServer(async(req,res)=>{
  res.setHeader('Content-Security-Policy',"default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'");
  if(pathname==='/health'){respond(res,200,{ok:true});return;}
  if(pathname==='/api/device/poll'&&req.method==='POST'){
-   if(!isDevice(req)){respond(res,401,{error:'Dispositivo no autorizado'});return;}
    try{const body=await readBody(req);deviceLastSeen=Date.now();deviceState=body.state&&typeof body.state==='object'?body.state:{};
      if(pending&&Number(body.ack)===pending.id)pending=null;
      if(pending&&pending.expires<Date.now())pending=null;
      respond(res,200,{command:pending?pending.command:null});
    }catch{respond(res,400,{error:'Formato inválido'});}return;
  }
- if(pathname==='/api/login'&&req.method==='POST'){
-   if(rejectCrossOrigin(req,res))return;
-   const ip=(req.socket.remoteAddress||'unknown');const record=logins.get(ip)||{count:0,until:0};
-   if(Date.now()>record.until){record.count=0;record.until=Date.now()+60000;}
-   if(record.count>=8){respond(res,429,{error:'Demasiados intentos. Intenta en un minuto.'});return;}
-   try{const body=await readBody(req);if(!secureEq(body.password||'',ADMIN_PASSWORD)){record.count++;logins.set(ip,record);respond(res,401,{error:'Contraseña incorrecta'});return;}
-     logins.delete(ip);respond(res,200,{ok:true},{'Set-Cookie':'casa_session='+cookieValue()+'; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=28800'});
-   }catch{respond(res,400,{error:'Solicitud inválida'});}return;
- }
- if(pathname==='/api/logout'&&req.method==='POST'){if(rejectCrossOrigin(req,res))return;respond(res,200,{ok:true},{'Set-Cookie':'casa_session=; HttpOnly; Secure; SameSite=Strict; Path=/; Max-Age=0'});return;}
  if(pathname==='/api/state'&&req.method==='GET'){
-   if(!authorized(req)){respond(res,401,{error:'Inicia sesión'});return;}
    respond(res,200,{online:isOnline(),ageSeconds:deviceLastSeen?Math.floor((Date.now()-deviceLastSeen)/1000):null,state:deviceState,commandPending:!!pending});return;
  }
  if(pathname==='/api/command'&&req.method==='POST'){
    if(rejectCrossOrigin(req,res))return;
-   if(!authorized(req)){respond(res,401,{error:'Inicia sesión'});return;}
    if(!isOnline()){respond(res,409,{error:'ESP32 desconectado. No se enviará la orden.'});return;}
    if(pending&&pending.expires<Date.now())pending=null;
    if(pending){respond(res,409,{error:'Hay una orden en proceso. Inténtalo de nuevo.'});return;}
